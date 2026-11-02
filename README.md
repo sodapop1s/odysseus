@@ -23,26 +23,76 @@
 
 ---
 
-## Quick Start
+## Quick Start (Windows, native, no Docker)
 
-> `dev` is the default branch and gets the newest changes first. Use [`main`](https://github.com/odysseus-dev/odysseus/tree/main) if you want the more curated branch.
+> This is a fork of [odysseus-dev/odysseus](https://github.com/odysseus-dev/odysseus) focused on running natively on Windows. The Windows changes live on the `windows-launcher-chromadb` branch. Upstream does not actively test Windows; see [WINDOWS-PORT.md](WINDOWS-PORT.md) for exactly what was and was not verified here.
 
-```bash
-git clone https://github.com/odysseus-dev/odysseus.git
+**1. Install the prerequisites** (PowerShell):
+
+```powershell
+winget install -e --id Python.Python.3.12
+winget install -e --id Git.Git
+winget install -e --id OpenJS.NodeJS.LTS
+```
+
+Python 3.11+ and Git are required. Node.js is optional but needed for the built-in Browser tool. Open a new terminal afterwards so the new programs are on `PATH`.
+
+**2. Get the code and start it:**
+
+```powershell
+git clone --branch windows-launcher-chromadb https://github.com/sodapop1s/odysseus.git
 cd odysseus
-cp .env.example .env
-docker compose up -d --build
+powershell -ExecutionPolicy Bypass -File .\launch-windows.ps1
 ```
 
-Open `http://localhost:7011` when the containers are healthy. The first admin password is printed in `docker compose logs odysseus`.
+The first run takes a few minutes. The launcher is safe to re-run, and it:
 
-The compose files pull the official multi-arch image `ghcr.io/odysseus-dev/odysseus` (published by CI on every push to `main` and `dev`) and only build locally if the pull fails — so this also works on hosts without a build toolchain, e.g. as a [Portainer](https://www.portainer.io/) stack.
+1. finds Python 3.11+ and creates a `venv`;
+2. installs the dependencies from `requirements.txt`;
+3. installs ChromaDB into a separate `venv-chroma` (used for the tool index, RAG and semantic memory);
+4. runs first-time setup and asks you to choose an admin username and password;
+5. starts ChromaDB on `127.0.0.1:8100`, then the web server.
 
-**Production deployments:** pin the immutable tag instead of `:latest`. `:latest` and bare `:X.Y.Z` tags move on every push to `main`, but `:X.Y.Z-<sha>` (e.g. `1.0.2-7c8070f`) always refers to one specific build:
+**3. Open `http://127.0.0.1:7000`** and sign in with the admin account you created. Add a model endpoint (for example a local Ollama, or an API key) under Settings before chatting.
 
-```bash
-ODYSSEUS_IMAGE=ghcr.io/odysseus-dev/odysseus:1.0.2-7c8070f docker compose up -d
+Press **Ctrl+C** in the terminal to stop. That stops both the web server and ChromaDB.
+
+### Options
+
+```powershell
+# different port, or expose on your LAN (only if you mean to)
+powershell -ExecutionPolicy Bypass -File .\launch-windows.ps1 -Port 7001 -BindHost 0.0.0.0
 ```
+
+| Setting | How to change it |
+|---|---|
+| ChromaDB host/port | `CHROMADB_HOST` / `CHROMADB_PORT` environment variables (a non-local host is not started for you) |
+| Admin account without a prompt | set `ODYSSEUS_ADMIN_USER` and `ODYSSEUS_ADMIN_PASSWORD` before the first run |
+| Other settings | `.env` (created from `.env.example` on first run), see the [setup guide](website/setup.md) |
+
+All user data lives in `data\` and logs in `logs\`. Both are git-ignored.
+
+### Portable `.exe`
+
+To build a standalone `Odysseus.exe` (system-tray app, opens your browser on port 7011):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-windows-portable.ps1
+```
+
+The output is in `dist\Odysseus`. Keep the whole folder together.
+
+### Troubleshooting
+
+- **"running scripts is disabled"**: use the `-ExecutionPolicy Bypass -File` form shown above instead of running the script directly.
+- **Path errors while extracting or cloning**: keep the checkout in a short path such as `C:\odysseus` (Windows long paths are off by default).
+- **Browser tool unavailable**: install Node.js (`winget install OpenJS.NodeJS.LTS`) and restart the launcher.
+- **Vector memory or RAG shows as degraded**: check `logs\chromadb.err.log`, and make sure nothing else is using port 8100.
+- **Shell and sandbox tools**: Linux-only sandboxing (bwrap and similar) is not available on Windows, so the agent's shell tool reports "containment unavailable". Installing Git for Windows provides `bash.exe` for Cookbook background downloads.
+
+### Docker
+
+Docker still works as upstream documents it. See the [setup guide](website/setup.md) for the compose instructions and production tag pinning.
 
 Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration live in the [setup guide](website/setup.md).
 
