@@ -136,6 +136,25 @@ if ($LASTEXITCODE -ne 0) { Fail "TLS dependency bootstrap failed." }
 & $venvPy -m pip install -r requirements.txt
 if ($LASTEXITCODE -ne 0) { Fail "Dependency install failed. Scroll up for the pip error." }
 
+# 3b. ChromaDB backs the tool index, vector RAG and semantic memory. The full
+# `chromadb` package conflicts with `chromadb-client` (requirements.txt), so it
+# lives in its own venv and runs as a local server, like docker/start-macos.sh.
+$chromaHost = if ($env:CHROMADB_HOST) { $env:CHROMADB_HOST } else { "localhost" }
+$chromaPort = if ($env:CHROMADB_PORT) { [int]$env:CHROMADB_PORT } else { 8100 }
+$chromaLocal = @("localhost", "127.0.0.1", "0.0.0.0") -contains $chromaHost
+$chromaExe = Join-Path $PSScriptRoot "venv-chroma\Scripts\chroma.exe"
+if ($chromaLocal -and -not (Test-Path $chromaExe)) {
+    Write-Step "Installing ChromaDB server (venv-chroma)"
+    & $pyExe @pyArgs -m venv venv-chroma
+    $chromaPy = Join-Path $PSScriptRoot "venv-chroma\Scripts\python.exe"
+    if ($LASTEXITCODE -eq 0 -and (Test-Path $chromaPy)) {
+        & $chromaPy -m pip install --quiet chromadb
+    }
+    if (-not (Test-Path $chromaExe)) {
+        Write-Host "WARNING: ChromaDB install failed; vector memory/RAG will be degraded." -ForegroundColor Yellow
+    }
+}
+
 # 4. First-time setup (creates data dirs, DB, .env, admin user)
 Write-Step "Running first-time setup"
 & $venvPy setup.py
@@ -168,7 +187,56 @@ if (Test-Path $cudaBase) {
 # instance - internal_api_base(), companion pairing, the MCP OAuth callback -
 # reads APP_PORT, so set it too or they all assume 7000.
 $env:APP_PORT = $Port
+# Windows defaults text I/O to the legacy ANSI codepage; the app reads/writes UTF-8.
+$env:PYTHONUTF8 = "1"
+
+# Start ChromaDB in the background unless one is already listening (or remote).
+$chromaProc = $null
+if ($chromaLocal -and (Test-Path $chromaExe)) {
+    $chromaUp = $false
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $tcp.Connect("127.0.0.1", $chromaPort)
+        $tcp.Close()
+        $chromaUp = $true
+    } catch {}
+    if ($chromaUp) {
+        Write-Host "ChromaDB already running on 127.0.0.1:$chromaPort - using it."
+    } else {
+        $chromaBind = if ($chromaHost -eq "0.0.0.0") { "0.0.0.0" } else { "127.0.0.1" }
+        $chromaData = Join-Path $PSScriptRoot "data\chroma"
+        New-Item -ItemType Directory -Force $chromaData | Out-Null
+        New-Item -ItemType Directory -Force (Join-Path $PSScriptRoot "logs") | Out-Null
+        Write-Step ("Starting ChromaDB on {0}:{1}" -f $chromaBind, $chromaPort)
+        $chromaProc = Start-Process -FilePath $chromaExe `
+            -ArgumentList @("run", "--host", $chromaBind, "--port", $chromaPort, "--path", "`"$chromaData`"") `
+            -RedirectStandardOutput (Join-Path $PSScriptRoot "logs\chromadb.out.log") `
+            -RedirectStandardError (Join-Path $PSScriptRoot "logs\chromadb.err.log") `
+            -WindowStyle Hidden -PassThru
+        for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 1
+            try {
+                $tcp = New-Object System.Net.Sockets.TcpClient
+                $tcp.Connect("127.0.0.1", $chromaPort)
+                $tcp.Close()
+                break
+            } catch {}
+        }
+    }
+}
+
+if (-not (Get-Command npx.cmd -ErrorAction SilentlyContinue)) {
+    Write-Host "NOTE: Node.js (npx) not found; the built-in Browser MCP tool is unavailable." -ForegroundColor Yellow
+    Write-Host "      Install it with: winget install OpenJS.NodeJS.LTS" -ForegroundColor Yellow
+}
+
 Write-Step ("Starting Odysseus at http://{0}:{1}" -f $BindHost, $Port)
 Write-Host "Press Ctrl+C to stop."
 Write-Host ""
-& $venvPy -m uvicorn app:app --host $BindHost --port $Port
+try {
+    & $venvPy -m uvicorn app:app --host $BindHost --port $Port
+} finally {
+    if ($chromaProc -and -not $chromaProc.HasExited) {
+        Stop-Process -Id $chromaProc.Id -Force -ErrorAction SilentlyContinue
+    }
+}
